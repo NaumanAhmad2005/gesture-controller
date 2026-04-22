@@ -1,0 +1,5 @@
+# Hand Gesture Mouse Controller - Dependencies
+mediapipe==0.10.13
+opencv-python==4.9.0.80
+pyautogui==0.9.54
+numpy==1.26.3
