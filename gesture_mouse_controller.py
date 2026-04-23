@@ -104,9 +104,13 @@ class AppState:
         # Drawing canvas (transparent overlay)
         self.canvas = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
         
-        # Previous positions for scroll/draw detection
-        self.prev_hand_y = None
+        # Previous positions for draw detection
         self.prev_y = None
+        
+        # Pinch states for edge detection and double-click
+        self.index_thumb_pinched = False
+        self.middle_thumb_pinched = False
+        self.last_index_pinch_time = 0
 
 state = AppState()
 
@@ -239,16 +243,12 @@ def detect_gestures(landmarks, handedness):
     # Calculate distances
     index_thumb_dist = calculate_distance(landmarks[INDEX_TIP], landmarks[THUMB_TIP])
     middle_thumb_dist = calculate_distance(landmarks[MIDDLE_TIP], landmarks[THUMB_TIP])
-    index_middle_dist = calculate_distance(landmarks[INDEX_TIP], landmarks[MIDDLE_TIP])
     
-    # Scroll mode: ONLY index and middle fingers up (ring and pinky MUST be down)
-    # This prevents accidental scroll mode when hand is fully open
-    scroll_mode_active = (index_up and middle_up and 
-                          not ring_up and not pinky_up and 
-                          index_middle_dist < SCROLL_THRESHOLD)
+    is_index_thumb_pinched = index_thumb_dist < PINCH_THRESHOLD
+    is_middle_thumb_pinched = middle_thumb_dist < PINCH_THRESHOLD
     
     # Mode switching: Toggle drawing mode with all fingers up (open palm)
-    if index_up and middle_up and ring_up and pinky_up and not scroll_mode_active:
+    if index_up and middle_up and ring_up and pinky_up:
         # Hold for a moment to toggle (prevent accidental switches)
         if state.prev_y is None:
             state.prev_y = time.time()
@@ -265,59 +265,47 @@ def detect_gestures(landmarks, handedness):
     
     # Drawing mode logic
     if state.mode == 'drawing':
-        # Color switching via pinch (index + thumb)
-        index_thumb_dist = calculate_distance(landmarks[INDEX_TIP], landmarks[THUMB_TIP])
-        
-        if index_up and index_thumb_dist < PINCH_THRESHOLD:
-            # Cycle through colors on pinch
+        # Eraser mode: Index and thumb pinched together
+        if is_index_thumb_pinched:
+            gestures['action'] = 'erase'
+            
+        # Change color: Thumb and middle finger pinched once (edge detection)
+        elif is_middle_thumb_pinched and not state.middle_thumb_pinched:
             color_order = ['blue', 'red', 'green', 'yellow', 'white']
             current_idx = color_order.index(state.current_color) if state.current_color in color_order else 0
             next_color = color_order[(current_idx + 1) % len(color_order)]
             gestures['color_change'] = next_color
             gestures['action'] = 'color_change'
-        # Eraser mode: Thumb up (thumb tip above thumb IP joint)
-        elif is_finger_up(landmarks, THUMB_TIP, 3):  # Thumb IP joint is landmark 3
-            gestures['action'] = 'erase'
-        # Drawing with index finger
-        elif index_up and not middle_up:
+            
+        # Drawing with index finger (and no pinch)
+        elif index_up and not middle_up and not ring_up and not pinky_up and not is_index_thumb_pinched:
             gestures['action'] = 'draw'
-        
-        # Manual color switching with fingers (alternative)
-        if not gestures.get('color_change'):
-            if pinky_up and not ring_up:
-                gestures['color_change'] = 'blue'
-            elif ring_up and not pinky_up:
-                gestures['color_change'] = 'red'
-            elif middle_up and not ring_up and not pinky_up:
-                gestures['color_change'] = 'green'
-    
-    # Scroll mode: Index and middle fingers up, ring and pinky down, fingers close together
-    elif scroll_mode_active:
-        gestures['mode'] = 'scroll'
-        state.mode = 'scroll'
-        
-        # Scroll action based on hand movement
-        if state.prev_hand_y is not None:
-            hand_y = landmarks[INDEX_TIP].y
-            scroll_delta = (state.prev_hand_y - hand_y) * SCROLL_SENSITIVITY
-            if abs(scroll_delta) > 1:
-                gestures['action'] = 'scroll'
-                gestures['scroll_value'] = int(scroll_delta)
-        state.prev_hand_y = landmarks[INDEX_TIP].y
-    
+            
     # Mouse mode (default)
     else:
-        if state.mode != 'mouse':
-            state.prev_hand_y = None
         state.mode = 'mouse'
         
-        # Left click (index + thumb pinch) - index must be up
-        if index_up and index_thumb_dist < PINCH_THRESHOLD:
-            gestures['action'] = 'left_click'
-        
-        # Right click (middle + thumb pinch) - middle must be up, index must be down
-        elif middle_up and not index_up and middle_thumb_dist < PINCH_THRESHOLD:
+        # Right click / options: thumb and middle pinch (edge detection)
+        if is_middle_thumb_pinched and not state.middle_thumb_pinched:
             gestures['action'] = 'right_click'
+            
+        # Left click or Double click: thumb and index pinch (edge detection)
+        elif is_index_thumb_pinched and not state.index_thumb_pinched:
+            current_time = time.time()
+            if current_time - state.last_index_pinch_time < 0.5:
+                gestures['action'] = 'double_click'
+                state.last_index_pinch_time = 0  # reset to prevent triple click
+            else:
+                gestures['action'] = 'left_click'
+                state.last_index_pinch_time = current_time
+                
+        # Move mouse: only index finger is up
+        elif index_up and not middle_up and not ring_up and not pinky_up and not is_index_thumb_pinched:
+            gestures['action'] = 'move'
+            
+    # Update pinch states for next frame
+    state.index_thumb_pinched = is_index_thumb_pinched
+    state.middle_thumb_pinched = is_middle_thumb_pinched
     
     return gestures
 
@@ -352,16 +340,17 @@ def control_mouse(landmarks, gestures):
     # Map to screen coordinates
     screen_x, screen_y = map_coordinates(smoothed_x, smoothed_y)
     
-    # Move mouse
-    pyautogui.moveTo(screen_x, screen_y, duration=0.1)
-    
     # Execute actions
-    if gestures['action'] == 'left_click':
-        pyautogui.click(button='left')
-    elif gestures['action'] == 'right_click':
-        pyautogui.click(button='right')
-    elif gestures['action'] == 'scroll':
-        pyautogui.scroll(gestures.get('scroll_value', 0))
+    if gestures.get('action') in ['move', 'left_click', 'double_click', 'right_click']:
+        # Move mouse only if action is one of the valid movement/click actions
+        pyautogui.moveTo(screen_x, screen_y, duration=0.1)
+        
+        if gestures['action'] == 'left_click':
+            pyautogui.click(button='left')
+        elif gestures['action'] == 'double_click':
+            pyautogui.doubleClick()
+        elif gestures['action'] == 'right_click':
+            pyautogui.click(button='right')
 
 # ============================================================================
 # DRAWING LOGIC
@@ -484,11 +473,11 @@ def draw_overlay(frame, landmarks, handedness, gestures):
     instructions = [
         "Q: Quit | P: Pause | C: Clear Canvas",
         "Open palm (1.5s): Toggle Draw Mode",
-        "Draw: Pinch=Color | Thumb Up=Eraser"
+        "Draw: Index=Draw | Pinch=Erase | Mid+Thumb=Color"
     ] if state.mode == 'drawing' else [
         "Q: Quit | P: Pause | C: Clear Canvas",
         "Open palm (1.5s): Toggle Draw Mode",
-        "Mouse: Index=Move | Pinch=Click | ✌️=Scroll"
+        "Mouse: Index=Move | Pinch=Sel/Opn | Mid+Thumb=Opts"
     ]
     
     for i, instr in enumerate(instructions):
@@ -555,11 +544,14 @@ def main():
     print(f"Buffer Zone: {BUFFER_ZONE * 100:.0f}%")
     print("\nControls:")
     print("  - Index finger: Move cursor")
-    print("  - Index + Thumb pinch: Left click")
-    print("  - Middle + Thumb pinch: Right click")
-    print("  - Index + Middle up: Scroll mode")
+    print("  - Closed hand: No action (cursor freezes)")
+    print("  - Index + Thumb pinch once: Left click / Select")
+    print("  - Index + Thumb pinch twice: Double click / Open")
+    print("  - Middle + Thumb pinch: Right click / Options")
     print("  - Open palm (1.5s): Toggle drawing mode")
-    print("  - Drawing: Pinky=Blue, Ring=Red, Middle=Green")
+    print("  - Drawing mode: Index finger draws")
+    print("  - Drawing mode: Index + Thumb pinch to erase")
+    print("  - Drawing mode: Middle + Thumb pinch to change color")
     print("\nPress 'q' to quit, 'p' to pause\n")
     print("=" * 60)
     
