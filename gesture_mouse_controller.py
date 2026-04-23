@@ -110,7 +110,9 @@ class AppState:
         # Pinch states for edge detection and double-click
         self.index_thumb_pinched = False
         self.middle_thumb_pinched = False
-        self.last_index_pinch_time = 0
+        self.index_pinch_start_time = 0
+        self.last_click_time = 0
+        self.is_dragging = False
 
 state = AppState()
 
@@ -289,18 +291,26 @@ def detect_gestures(landmarks, handedness):
         if is_middle_thumb_pinched and not state.middle_thumb_pinched:
             gestures['action'] = 'right_click'
             
-        # Left click or Double click: thumb and index pinch (edge detection)
-        elif is_index_thumb_pinched and not state.index_thumb_pinched:
-            current_time = time.time()
-            if current_time - state.last_index_pinch_time < 0.5:
-                gestures['action'] = 'double_click'
-                state.last_index_pinch_time = 0  # reset to prevent triple click
-            else:
-                gestures['action'] = 'left_click'
-                state.last_index_pinch_time = current_time
+        # Drag: thumb and index pinched for > 1.5s
+        elif is_index_thumb_pinched:
+            if not state.index_thumb_pinched:
+                state.index_pinch_start_time = time.time()
+                
+            if time.time() - state.index_pinch_start_time >= 1.5:
+                gestures['action'] = 'drag'
+                
+        # Click / Double Click: thumb and index pinch released
+        elif state.index_thumb_pinched and not is_index_thumb_pinched:
+            if time.time() - state.index_pinch_start_time < 1.5:
+                if time.time() - state.last_click_time < 0.5:
+                    gestures['action'] = 'double_click'
+                    state.last_click_time = 0
+                else:
+                    gestures['action'] = 'left_click'
+                    state.last_click_time = time.time()
                 
         # Move mouse: only index finger is up
-        elif index_up and not middle_up and not ring_up and not pinky_up and not is_index_thumb_pinched:
+        elif index_up and not middle_up and not ring_up and not pinky_up:
             gestures['action'] = 'move'
             
     # Update pinch states for next frame
@@ -340,17 +350,29 @@ def control_mouse(landmarks, gestures):
     # Map to screen coordinates
     screen_x, screen_y = map_coordinates(smoothed_x, smoothed_y)
     
-    # Execute actions
-    if gestures.get('action') in ['move', 'left_click', 'double_click', 'right_click']:
-        # Move mouse only if action is one of the valid movement/click actions
-        pyautogui.moveTo(screen_x, screen_y, duration=0.1)
-        
-        if gestures['action'] == 'left_click':
-            pyautogui.click(button='left')
-        elif gestures['action'] == 'double_click':
-            pyautogui.doubleClick()
-        elif gestures['action'] == 'right_click':
+    action = gestures.get('action')
+    
+    # Handle drag / click state
+    if action == 'drag':
+        if not state.is_dragging:
+            pyautogui.mouseDown(button='left')
+            state.is_dragging = True
+        # Move while dragging
+        pyautogui.moveTo(screen_x, screen_y, duration=0.05)
+    else:
+        # Release drag if it was active
+        if state.is_dragging:
+            pyautogui.mouseUp(button='left')
+            state.is_dragging = False
+            
+        if action == 'move':
+            pyautogui.moveTo(screen_x, screen_y, duration=0.05)
+        elif action == 'right_click':
             pyautogui.click(button='right')
+        elif action == 'left_click':
+            pyautogui.click(button='left')
+        elif action == 'double_click':
+            pyautogui.doubleClick(button='left')
 
 # ============================================================================
 # DRAWING LOGIC
@@ -477,7 +499,7 @@ def draw_overlay(frame, landmarks, handedness, gestures):
     ] if state.mode == 'drawing' else [
         "Q: Quit | P: Pause | C: Clear Canvas",
         "Open palm (1.5s): Toggle Draw Mode",
-        "Mouse: Index=Move | Pinch=Sel/Opn | Mid+Thumb=Opts"
+        "Mouse: Index=Move | Pinch=Drag/Click | Mid+Thumb=Opts"
     ]
     
     for i, instr in enumerate(instructions):
@@ -542,11 +564,11 @@ def main():
     print(f"Screen Resolution: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
     print(f"Webcam Resolution: {FRAME_WIDTH}x{FRAME_HEIGHT}")
     print(f"Buffer Zone: {BUFFER_ZONE * 100:.0f}%")
-    print("\nControls:")
+    print("Controls:")
     print("  - Index finger: Move cursor")
     print("  - Closed hand: No action (cursor freezes)")
-    print("  - Index + Thumb pinch once: Left click / Select")
-    print("  - Index + Thumb pinch twice: Double click / Open")
+    print("  - Index + Thumb pinch (quick): Left click / Double click")
+    print("  - Index + Thumb pinch (hold): Drag object")
     print("  - Middle + Thumb pinch: Right click / Options")
     print("  - Open palm (1.5s): Toggle drawing mode")
     print("  - Drawing mode: Index finger draws")
