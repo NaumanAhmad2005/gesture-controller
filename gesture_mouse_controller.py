@@ -29,6 +29,7 @@ import os
 # Try to import pyautogui with fallback for headless environments
 try:
     import pyautogui
+    pyautogui.PAUSE = 0  # Disable PyAutoGUI's default pause for smooth real-time control
     PYAUTOGUI_AVAILABLE = True
 except Exception as e:
     print(f"Warning: PyAutoGUI not available ({e})")
@@ -65,7 +66,7 @@ SCROLL_THRESHOLD = 0.3  # Distance between index and middle fingers for scroll m
 SCROLL_SENSITIVITY = 15  # Scroll speed multiplier
 
 # Smoothing parameters
-EMA_ALPHA = 0.3  # Exponential Moving Average factor (0.1-0.5, lower = smoother but more lag)
+EMA_ALPHA = 0.15  # Exponential Moving Average factor (0.1-0.5, lower = smoother but more lag)
 SMOOTHING_HISTORY = 10  # Number of frames for smoothing
 
 # Drawing settings
@@ -358,7 +359,7 @@ def control_mouse(landmarks, gestures):
             pyautogui.mouseDown(button='left')
             state.is_dragging = True
         # Move while dragging
-        pyautogui.moveTo(screen_x, screen_y, duration=0.05)
+        pyautogui.moveTo(screen_x, screen_y)
     else:
         # Release drag if it was active
         if state.is_dragging:
@@ -366,7 +367,7 @@ def control_mouse(landmarks, gestures):
             state.is_dragging = False
             
         if action == 'move':
-            pyautogui.moveTo(screen_x, screen_y, duration=0.05)
+            pyautogui.moveTo(screen_x, screen_y)
         elif action == 'right_click':
             pyautogui.click(button='right')
         elif action == 'left_click':
